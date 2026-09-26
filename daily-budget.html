@@ -65,6 +65,20 @@
     padding:11px 0; border-bottom:1px solid var(--line); font-size:14px;
   }
   ul.expenses li .note{color:var(--muted); font-size:12.5px; margin-top:2px;}
+  .tag-chip{display:inline-block; font-size:10.5px; padding:1px 7px; border-radius:999px; background:var(--surface); border:1px solid var(--line); color:var(--muted); margin-left:5px;}
+  .tag-filter{display:flex; gap:6px; flex-wrap:wrap; margin:0 0 14px; text-align:left;}
+  .tag-filter button{font-size:12px; padding:5px 10px; border-radius:999px; background:transparent; border:1px solid var(--line); color:var(--muted); font-weight:500; cursor:pointer;}
+  .tag-filter button.active{background:var(--gold); color:var(--accent-ink); border-color:var(--gold);}
+  .tag-breakdown{text-align:left; margin:0 0 18px;}
+  .tag-breakdown summary{cursor:pointer; list-style:none; font-size:13px; color:var(--muted); padding:2px 0;}
+  .tag-breakdown summary::-webkit-details-marker{display:none;}
+  .tag-breakdown summary .chev{display:inline-block; margin-left:4px; transition:transform .15s;}
+  .tag-breakdown[open] summary .chev{transform:rotate(90deg);}
+  .tag-bar-row{display:flex; align-items:center; gap:10px; padding:7px 0; font-size:13px;}
+  .tag-bar-label{width:64px; flex:none; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .tag-bar-track{flex:1; background:var(--line); border-radius:999px; height:6px; overflow:hidden;}
+  .tag-bar-fill{background:var(--gold); height:100%; border-radius:999px;}
+  .tag-bar-amt{width:64px; flex:none; text-align:right;}
   .empty{color:var(--muted); font-size:14px; padding:16px 0;}
   .gear{background:none; border:none; color:var(--muted); font-size:18px; cursor:pointer; padding:4px;}
   .panel{
@@ -117,6 +131,8 @@
 
   var state = load();
   var panelOpen = null; // 'setup' | 'settings' | null
+  var activeTag = null;
+  var tagBreakdownOpen = false;
   if (!state) panelOpen = 'setup';
 
   var app = document.getElementById('app');
@@ -136,7 +152,7 @@
       var over = daily < 0;
 
       html += '<div class="hero">'
-        + '<div class="row topbar"><button class="ghost install-btn" id="installBtn" type="button">Download app</button><span></span><button class="gear" data-act="settings">⚙</button></div>'
+        + '<div class="row topbar"><div style="display:flex; gap:8px;"><button class="ghost install-btn" id="installBtn" type="button">Download app</button><button class="ghost" data-act="export" type="button">Export</button></div><button class="gear" data-act="settings">⚙</button></div>'
         + '<div class="install-help" id="installHelp"></div>'
         + '<div class="num display' + (over?' neg-flag':'') + '">' + THB0.format(daily) + ' <small>/ day</small></div>'
         + '<div class="sub">' + daysLeft + ' day' + (daysLeft===1?'':'s') + ' until refresh &middot; ' + THB2.format(remaining) + ' left of ' + THB2.format(state.monthlyBudget) + '</div>'
@@ -145,22 +161,58 @@
       html += '<div class="section-title">Add expense</div>'
         + '<form class="add" id="addForm">'
         + '<input class="amt-input" type="number" step="0.01" min="0.01" placeholder="0.00" id="amtInput" required>'
-        + '<input type="text" placeholder="What for? (optional)" id="noteInput">'
+        + '<input type="text" placeholder="What for? #tag to tag it" id="noteInput">'
         + '<button type="submit">Add</button>'
         + '</form>';
 
-      var inCycle = state.expenses
+      var inCycleAll = state.expenses
         .filter(function(e){ return e.ts >= cyc.start.getTime() && e.ts < cyc.end.getTime(); })
         .sort(function(a,b){ return b.ts - a.ts; });
 
+      var allTags = [];
+      inCycleAll.forEach(function(e){ (e.tags||[]).forEach(function(t){ if (allTags.indexOf(t) === -1) allTags.push(t); }); });
+      var UNTAGGED = '__untagged__';
+      if (activeTag && activeTag !== UNTAGGED && allTags.indexOf(activeTag) === -1) activeTag = null;
+
+      var inCycle = !activeTag ? inCycleAll
+        : activeTag === UNTAGGED ? inCycleAll.filter(function(e){ return !(e.tags && e.tags.length); })
+        : inCycleAll.filter(function(e){ return (e.tags||[]).indexOf(activeTag) > -1; });
+
       html += '<div class="section-title">This cycle</div>';
+      if (allTags.length){
+        var hasUntagged = inCycleAll.some(function(e){ return !(e.tags && e.tags.length); });
+        var chipKeys = hasUntagged ? allTags.concat([UNTAGGED]) : allTags;
+
+        html += '<div class="tag-filter">' + chipKeys.map(function(t){
+          var label = t === UNTAGGED ? 'Untagged' : '#' + t;
+          return '<button type="button" data-act="tagfilter" data-tag="' + t + '" class="' + (activeTag===t?'active':'') + '">' + label + '</button>';
+        }).join('') + '</div>';
+
+        var tagTotals = {};
+        inCycleAll.forEach(function(e){
+          if (e.tags && e.tags.length) e.tags.forEach(function(t){ tagTotals[t] = (tagTotals[t]||0) + e.amount; });
+          else tagTotals[UNTAGGED] = (tagTotals[UNTAGGED]||0) + e.amount;
+        });
+        var tagRows = Object.keys(tagTotals).sort(function(a,b){ return tagTotals[b]-tagTotals[a]; });
+        var maxTotal = Math.max.apply(null, tagRows.map(function(t){ return tagTotals[t]; }));
+        html += '<details class="tag-breakdown"' + (tagBreakdownOpen?' open':'') + '><summary>Spent by tag <span class="chev">›</span></summary>'
+          + tagRows.map(function(t){
+              var pct = Math.max(4, Math.round(tagTotals[t]/maxTotal*100));
+              var label = t === UNTAGGED ? 'Untagged' : '#' + t;
+              return '<div class="tag-bar-row"><span class="tag-bar-label">' + label + '</span>'
+                + '<div class="tag-bar-track"><div class="tag-bar-fill" style="width:' + pct + '%"></div></div>'
+                + '<span class="tag-bar-amt">' + THB0.format(tagTotals[t]) + '</span></div>';
+            }).join('')
+          + '</details>';
+      }
       if (inCycle.length === 0){
-        html += '<div class="empty">No expenses logged yet this cycle.</div>';
+        html += '<div class="empty">' + (activeTag ? 'No expenses tagged #' + activeTag + ' this cycle.' : 'No expenses logged yet this cycle.') + '</div>';
       } else {
         html += '<ul class="expenses">' + inCycle.map(function(e){
           var d = new Date(e.ts);
+          var tags = (e.tags||[]).map(function(t){ return '<span class="tag-chip">#' + t + '</span>'; }).join('');
           return '<li><div><div>' + (e.note || 'Expense') + '</div>'
-            + '<div class="note">' + d.toLocaleDateString('en-GB',{day:'numeric',month:'short'}) + '</div></div>'
+            + '<div class="note">' + d.toLocaleDateString('en-GB',{day:'numeric',month:'short'}) + tags + '</div></div>'
             + '<div class="row" style="gap:10px;"><span>' + THB2.format(e.amount) + '</span>'
             + '<button class="icon" data-act="del" data-id="' + e.id + '">&times;</button></div></li>';
         }).join('') + '</ul>';
@@ -194,8 +246,10 @@
         ev.preventDefault();
         var amt = parseFloat(document.getElementById('amtInput').value);
         if (!amt || amt <= 0) return;
-        var note = document.getElementById('noteInput').value.trim();
-        state.expenses.push({ id: Date.now()+'-'+Math.random(), amount: amt, note: note, ts: Date.now() });
+        var noteRaw = document.getElementById('noteInput').value.trim();
+        var tags = [];
+        var note = noteRaw.replace(/#([\w-]+)/g, function(m, t){ tags.push(t.toLowerCase()); return ''; }).replace(/\s+/g,' ').trim();
+        state.expenses.push({ id: Date.now()+'-'+Math.random(), amount: amt, note: note, tags: tags, ts: Date.now() });
         save(state);
         render();
       });
@@ -207,6 +261,14 @@
         render();
       });
     });
+    app.querySelectorAll('[data-act="tagfilter"]').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        activeTag = (activeTag === btn.dataset.tag) ? null : btn.dataset.tag;
+        render();
+      });
+    });
+    var breakdown = app.querySelector('.tag-breakdown');
+    if (breakdown) breakdown.addEventListener('toggle', function(){ tagBreakdownOpen = breakdown.open; });
     var gear = app.querySelector('[data-act="settings"]');
     if (gear) gear.addEventListener('click', function(){ panelOpen = 'settings'; render(); });
     var cancel = app.querySelector('[data-act="cancelPanel"]');
@@ -224,6 +286,46 @@
       render();
     });
     wireInstallButton();
+    var exportBtn = app.querySelector('[data-act="export"]');
+    if (exportBtn) exportBtn.addEventListener('click', doExport);
+  }
+
+  // ---- Export ----
+  function buildCsv(expenses){
+    var rows = [['Date','Note','Tags','Amount (THB)']];
+    expenses.slice().sort(function(a,b){ return a.ts - b.ts; }).forEach(function(e){
+      var d = new Date(e.ts);
+      var dateStr = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+      var note = '"' + (e.note || '').replace(/"/g,'""') + '"';
+      var tags = '"' + (e.tags||[]).join(' ') + '"';
+      rows.push([dateStr, note, tags, e.amount.toFixed(2)]);
+    });
+    return rows.map(function(r){ return r.join(','); }).join('\n');
+  }
+  async function getDownloads(){
+    try{
+      if (typeof claude === 'undefined' || !claude.use) return null;
+      return await claude.use('downloads');
+    } catch(e){ return null; }
+  }
+  function fallbackDownload(csv, filename){
+    try{
+      var blob = new Blob([csv], {type:'text/csv'});
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch(e){}
+  }
+  async function doExport(){
+    if (!state || !state.expenses.length) return;
+    var csv = buildCsv(state.expenses);
+    var filename = 'budget-export-' + new Date().toISOString().slice(0,10) + '.csv';
+    var dl = await getDownloads();
+    if (!dl){ fallbackDownload(csv, filename); return; }
+    try{ await dl.save({ filename: filename, data: csv }); }
+    catch(e){ fallbackDownload(csv, filename); }
   }
 
   // ---- Install / download (PWA) ----
@@ -288,6 +390,12 @@
   }
 
   render();
+
+  setInterval(function(){
+    var active = document.activeElement;
+    var typing = active && app.contains(active) && active.tagName === 'INPUT';
+    if (!typing) render();
+  }, 60000);
 })();
 </script>
 </body>
