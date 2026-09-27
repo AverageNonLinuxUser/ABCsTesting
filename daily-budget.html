@@ -77,8 +77,12 @@
   .tag-bar-row{display:flex; align-items:center; gap:10px; padding:7px 0; font-size:13px;}
   .tag-bar-label{width:64px; flex:none; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
   .tag-bar-track{flex:1; background:var(--line); border-radius:999px; height:6px; overflow:hidden;}
-  .tag-bar-fill{background:var(--gold); height:100%; border-radius:999px;}
+  .tag-bar-fill{background:var(--gold); height:100%; border-radius:999px; transition:width .5s ease;}
   .tag-bar-amt{width:64px; flex:none; text-align:right;}
+  li.editing{display:block; padding:11px 0;}
+  .edit-form{display:flex; flex-direction:column; gap:8px;}
+  .edit-form input{width:100%;}
+  .edit-actions{display:flex; gap:8px; justify-content:flex-end;}
   .empty{color:var(--muted); font-size:14px; padding:16px 0;}
   .gear{background:none; border:none; color:var(--muted); font-size:18px; cursor:pointer; padding:4px;}
   .panel{
@@ -115,6 +119,9 @@
     var last = new Date(y, m+1, 0).getDate();
     return new Date(y, m, Math.min(day, last));
   }
+  function escapeAttr(s){
+    return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+  }
   function cycleFor(refreshDay, today){
     var y = today.getFullYear(), m = today.getMonth();
     var thisRefresh = clampDay(y,m,refreshDay); thisRefresh.setHours(0,0,0,0);
@@ -133,6 +140,7 @@
   var panelOpen = null; // 'setup' | 'settings' | null
   var activeTag = null;
   var tagBreakdownOpen = false;
+  var editingId = null;
   if (!state) panelOpen = 'setup';
 
   var app = document.getElementById('app');
@@ -200,7 +208,7 @@
               var pct = Math.max(4, Math.round(tagTotals[t]/maxTotal*100));
               var label = t === UNTAGGED ? 'Untagged' : '#' + t;
               return '<div class="tag-bar-row"><span class="tag-bar-label">' + label + '</span>'
-                + '<div class="tag-bar-track"><div class="tag-bar-fill" style="width:' + pct + '%"></div></div>'
+                + '<div class="tag-bar-track"><div class="tag-bar-fill" data-pct="' + pct + '" style="width:0%"></div></div>'
                 + '<span class="tag-bar-amt">' + THB0.format(tagTotals[t]) + '</span></div>';
             }).join('')
           + '</details>';
@@ -208,10 +216,22 @@
       if (inCycle.length === 0){
         html += '<div class="empty">' + (activeTag ? 'No expenses tagged #' + activeTag + ' this cycle.' : 'No expenses logged yet this cycle.') + '</div>';
       } else {
+        html += '<div class="hint" style="margin:0 0 8px;">Double-tap an entry to edit</div>';
         html += '<ul class="expenses">' + inCycle.map(function(e){
+          if (editingId === e.id){
+            var fullText = e.note + ((e.tags && e.tags.length) ? ' ' + e.tags.map(function(t){ return '#'+t; }).join(' ') : '');
+            return '<li class="editing"><form class="edit-form" data-act="editForm" data-id="' + e.id + '">'
+              + '<input type="number" step="0.01" min="0.01" class="edit-amt" value="' + e.amount + '" required>'
+              + '<input type="text" class="edit-note" value="' + escapeAttr(fullText) + '" placeholder="What for? #tag to tag it">'
+              + '<div class="edit-actions">'
+              + '<button type="button" class="ghost" data-act="deleteEdit" data-id="' + e.id + '">Delete</button>'
+              + '<button type="button" class="ghost" data-act="cancelEdit">Cancel</button>'
+              + '<button type="submit">Save</button>'
+              + '</div></form></li>';
+          }
           var d = new Date(e.ts);
           var tags = (e.tags||[]).map(function(t){ return '<span class="tag-chip">#' + t + '</span>'; }).join('');
-          return '<li><div><div>' + (e.note || 'Expense') + '</div>'
+          return '<li data-act="editRow" data-id="' + e.id + '"><div><div>' + (e.note || 'Expense') + '</div>'
             + '<div class="note">' + d.toLocaleDateString('en-GB',{day:'numeric',month:'short'}) + tags + '</div></div>'
             + '<div class="row" style="gap:10px;"><span>' + THB2.format(e.amount) + '</span>'
             + '<button class="icon" data-act="del" data-id="' + e.id + '">&times;</button></div></li>';
@@ -237,6 +257,11 @@
 
     app.innerHTML = html;
     wire();
+    requestAnimationFrame(function(){
+      app.querySelectorAll('.tag-bar-fill').forEach(function(el){
+        el.style.width = el.getAttribute('data-pct') + '%';
+      });
+    });
   }
 
   function wire(){
@@ -267,6 +292,39 @@
         render();
       });
     });
+    app.querySelectorAll('li[data-act="editRow"]').forEach(function(li){
+      li.addEventListener('dblclick', function(ev){
+        if (ev.target.closest('[data-act="del"]')) return;
+        editingId = li.dataset.id;
+        render();
+      });
+    });
+    var editForm = app.querySelector('[data-act="editForm"]');
+    if (editForm){
+      editForm.addEventListener('submit', function(ev){
+        ev.preventDefault();
+        var amt = parseFloat(editForm.querySelector('.edit-amt').value);
+        if (!amt || amt <= 0) return;
+        var raw = editForm.querySelector('.edit-note').value.trim();
+        var tags = [];
+        var note = raw.replace(/#([\w-]+)/g, function(m,t){ tags.push(t.toLowerCase()); return ''; }).replace(/\s+/g,' ').trim();
+        var exp = state.expenses.find(function(x){ return x.id === editForm.dataset.id; });
+        if (exp){ exp.amount = amt; exp.note = note; exp.tags = tags; save(state); }
+        editingId = null;
+        render();
+      });
+    }
+    var cancelEdit = app.querySelector('[data-act="cancelEdit"]');
+    if (cancelEdit) cancelEdit.addEventListener('click', function(){ editingId = null; render(); });
+    var deleteEdit = app.querySelector('[data-act="deleteEdit"]');
+    if (deleteEdit){
+      deleteEdit.addEventListener('click', function(){
+        state.expenses = state.expenses.filter(function(x){ return x.id !== deleteEdit.dataset.id; });
+        save(state);
+        editingId = null;
+        render();
+      });
+    }
     var breakdown = app.querySelector('.tag-breakdown');
     if (breakdown) breakdown.addEventListener('toggle', function(){ tagBreakdownOpen = breakdown.open; });
     var gear = app.querySelector('[data-act="settings"]');
