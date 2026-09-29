@@ -36,7 +36,8 @@
   .display{font-family:'Fraunces',Georgia,serif;}
   h1.brand{font-size:15px; letter-spacing:.02em; color:var(--muted); margin:0 0 22px; font-weight:500;}
   .hero{border-bottom:1px solid var(--line); padding-bottom:22px; margin-bottom:22px;}
-  .hero .num{font-size:56px; line-height:1.05; font-weight:600;}
+  .hero .num{font-size:56px; line-height:1.05; font-weight:600; cursor:pointer; transition:opacity .18s ease, transform .18s ease, color .18s ease;}
+  .hero .num.num-out, .hero .num.num-in{opacity:0; transform:scale(.92);}
   .hero .num small{font-size:22px; color:var(--muted); font-weight:400;}
   .hero .sub{color:var(--muted); font-size:14px; margin-top:8px;}
   .neg-flag{color:var(--neg);}
@@ -62,8 +63,10 @@
   ul.expenses{list-style:none; margin:0; padding:0;}
   ul.expenses li{
     display:flex; justify-content:space-between; align-items:center;
-    padding:11px 0; border-bottom:1px solid var(--line); font-size:14px;
+    padding:11px 8px; margin:0 -8px; border-bottom:1px solid var(--line); font-size:14px;
+    border-radius:8px; transition:background-color .15s ease; cursor:pointer;
   }
+  ul.expenses li.selected{background:rgba(198,160,246,.16);}
   ul.expenses li .note{color:var(--muted); font-size:12.5px; margin-top:2px;}
   .tag-chip{display:inline-block; font-size:10.5px; padding:1px 7px; border-radius:999px; background:var(--surface); border:1px solid var(--line); color:var(--muted); margin-left:5px;}
   .tag-filter{display:flex; gap:6px; flex-wrap:wrap; margin:0 0 14px; text-align:left;}
@@ -141,6 +144,10 @@
   var activeTag = null;
   var tagBreakdownOpen = false;
   var editingId = null;
+  var selectedId = null;
+  var dailyMode = 'dynamic'; // 'dynamic' | 'static'
+  var heroJustSwitched = false;
+  var calc = {};
   if (!state) panelOpen = 'setup';
 
   var app = document.getElementById('app');
@@ -154,16 +161,24 @@
       var spent = state.expenses
         .filter(function(e){ return e.ts >= cyc.start.getTime() && e.ts < cyc.end.getTime(); })
         .reduce(function(a,e){ return a + e.amount; }, 0);
+      var spentToday = state.expenses
+        .filter(function(e){ return e.ts >= today.getTime(); })
+        .reduce(function(a,e){ return a + e.amount; }, 0);
       var remaining = state.monthlyBudget - spent;
       var daysLeft = Math.max(1, Math.round((cyc.end - today) / 86400000));
-      var daily = remaining / daysLeft;
+      var dynamicDaily = remaining / daysLeft;
+      var staticDaily = (state.monthlyBudget - (spent - spentToday)) / daysLeft;
+      var daily = dailyMode === 'static' ? staticDaily : dynamicDaily;
       var over = daily < 0;
+      calc.remaining = remaining;
+      calc.daysLeft = daysLeft;
 
       html += '<div class="hero">'
         + '<div class="row topbar"><div style="display:flex; gap:8px;"><button class="ghost install-btn" id="installBtn" type="button">Download app</button><button class="ghost" data-act="export" type="button">Export</button></div><button class="gear" data-act="settings">⚙</button></div>'
         + '<div class="install-help" id="installHelp"></div>'
-        + '<div class="num display' + (over?' neg-flag':'') + '">' + THB0.format(daily) + ' <small>/ day</small></div>'
+        + '<div class="num display' + (over?' neg-flag':'') + (heroJustSwitched?' num-in':'') + '" id="heroNum">' + THB2.format(daily) + ' <small>/ day</small></div>'
         + '<div class="sub">' + daysLeft + ' day' + (daysLeft===1?'':'s') + ' until refresh &middot; ' + THB2.format(remaining) + ' left of ' + THB2.format(state.monthlyBudget) + '</div>'
+        + '<div class="sub" style="font-size:12px; margin-top:2px;">' + (dailyMode==='static' ? 'Static \u2014 excludes today\u2019s spending' : 'Dynamic \u2014 includes today\u2019s spending') + ' (double-tap to switch)</div>'
         + '</div>';
 
       html += '<div class="section-title">Add expense</div>'
@@ -171,7 +186,8 @@
         + '<input class="amt-input" type="number" step="0.01" min="0.01" placeholder="0.00" id="amtInput" required>'
         + '<input type="text" placeholder="What for? #tag to tag it" id="noteInput">'
         + '<button type="submit">Add</button>'
-        + '</form>';
+        + '</form>'
+        + '<div class="hint" id="impactHint" style="margin:-8px 0 14px; min-height:1em;"></div>';
 
       var inCycleAll = state.expenses
         .filter(function(e){ return e.ts >= cyc.start.getTime() && e.ts < cyc.end.getTime(); })
@@ -209,7 +225,7 @@
               var label = t === UNTAGGED ? 'Untagged' : '#' + t;
               return '<div class="tag-bar-row"><span class="tag-bar-label">' + label + '</span>'
                 + '<div class="tag-bar-track"><div class="tag-bar-fill" data-pct="' + pct + '" style="width:0%"></div></div>'
-                + '<span class="tag-bar-amt">' + THB0.format(tagTotals[t]) + '</span></div>';
+                + '<span class="tag-bar-amt">' + THB2.format(tagTotals[t]) + '</span></div>';
             }).join('')
           + '</details>';
       }
@@ -231,7 +247,7 @@
           }
           var d = new Date(e.ts);
           var tags = (e.tags||[]).map(function(t){ return '<span class="tag-chip">#' + t + '</span>'; }).join('');
-          return '<li data-act="editRow" data-id="' + e.id + '"><div><div>' + (e.note || 'Expense') + '</div>'
+          return '<li class="' + (selectedId===e.id?'selected':'') + '" data-act="editRow" data-id="' + e.id + '"><div><div>' + (e.note || 'Expense') + '</div>'
             + '<div class="note">' + d.toLocaleDateString('en-GB',{day:'numeric',month:'short'}) + tags + '</div></div>'
             + '<div class="row" style="gap:10px;"><span>' + THB2.format(e.amount) + '</span>'
             + '<button class="icon" data-act="del" data-id="' + e.id + '">&times;</button></div></li>';
@@ -245,7 +261,7 @@
       html += '<div class="panel"><div class="card">'
         + '<h2>' + (panelOpen==='setup' ? 'Set up your budget' : 'Edit budget') + '</h2>'
         + '<label for="mbInput">Monthly budget (THB)</label>'
-        + '<input type="number" min="1" step="1" id="mbInput" value="' + mb + '" placeholder="15000">'
+        + '<input type="number" min="0.01" step="0.01" id="mbInput" value="' + mb + '" placeholder="15000">'
         + '<label for="rdInput">Resets on day of month</label>'
         + '<input type="number" min="1" max="31" id="rdInput" value="' + rd + '" placeholder="1">'
         + '<div class="hint">E.g. if you get paid on the 25th, set this to 25.</div>'
@@ -261,6 +277,14 @@
     app.innerHTML = html;
     wire();
     animateBars();
+    if (heroJustSwitched){
+      heroJustSwitched = false;
+      var hn = document.getElementById('heroNum');
+      if (hn){
+        void hn.offsetWidth; // force reflow so the starting state paints
+        requestAnimationFrame(function(){ hn.classList.remove('num-in'); });
+      }
+    }
   }
 
   function animateBars(){
@@ -274,6 +298,22 @@
         bars.forEach(function(el){ el.style.width = el.getAttribute('data-pct') + '%'; });
       });
     });
+  }
+
+  function updateImpactHint(){
+    var hintEl = document.getElementById('impactHint');
+    if (!hintEl) return;
+    var amt = parseFloat(document.getElementById('amtInput').value);
+    if (!amt || amt <= 0){ hintEl.textContent = ''; return; }
+    if (calc.daysLeft <= 1){
+      hintEl.textContent = 'No effect on tomorrow \u2014 a new cycle starts.';
+      return;
+    }
+    var tmrDays = calc.daysLeft - 1;
+    var before = calc.remaining / tmrDays;
+    var after = (calc.remaining - amt) / tmrDays;
+    hintEl.textContent = 'Tomorrow\u2019s budget: ' + THB2.format(before) + ' \u2192 ' + THB2.format(after)
+      + ' (' + THB2.format(after - before) + '/day)';
   }
 
   function wire(){
@@ -291,6 +331,17 @@
         render();
       });
     }
+    var amtInput = document.getElementById('amtInput');
+    if (amtInput) amtInput.addEventListener('input', updateImpactHint);
+    var heroNum = document.getElementById('heroNum');
+    if (heroNum) heroNum.addEventListener('dblclick', function(){
+      heroNum.classList.add('num-out');
+      setTimeout(function(){
+        dailyMode = dailyMode === 'static' ? 'dynamic' : 'static';
+        heroJustSwitched = true;
+        render();
+      }, 170);
+    });
     app.querySelectorAll('[data-act="del"]').forEach(function(btn){
       btn.addEventListener('click', function(){
         state.expenses = state.expenses.filter(function(e){ return e.id !== btn.dataset.id; });
@@ -305,9 +356,15 @@
       });
     });
     app.querySelectorAll('li[data-act="editRow"]').forEach(function(li){
+      li.addEventListener('click', function(ev){
+        if (ev.target.closest('[data-act="del"]')) return;
+        selectedId = (selectedId === li.dataset.id) ? null : li.dataset.id;
+        render();
+      });
       li.addEventListener('dblclick', function(ev){
         if (!(state && state.quickEditEnabled)) return;
         if (ev.target.closest('[data-act="del"]')) return;
+        selectedId = null;
         editingId = li.dataset.id;
         render();
       });
