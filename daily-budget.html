@@ -100,6 +100,19 @@
   .panel .actions{display:flex; gap:10px; margin-top:20px;}
   .panel h2{margin:0; font-size:18px; font-family:'Fraunces',serif; font-weight:600;}
   .hint{font-size:12.5px; color:var(--muted); margin-top:6px;}
+  .mode-switch{display:flex; gap:4px;}
+  .mode-switch button{font-size:13px; line-height:1; padding:5px 9px; border-radius:6px; background:transparent; border:1px solid var(--line); color:var(--muted); cursor:pointer;}
+  .mode-switch button.active{background:var(--gold); color:var(--accent-ink); border-color:var(--gold);}
+  button.danger{background:var(--neg); color:var(--accent-ink);}
+  button.danger-text{color:var(--neg); border-color:var(--neg);}
+  label.del-row{display:flex; align-items:center; gap:10px; width:100%; cursor:pointer;}
+  label.del-row input[type=checkbox]{width:auto; flex:none; accent-color:var(--gold);}
+  label.del-row .del-row-text{flex:1; min-width:0; overflow:hidden;}
+  label.del-row .del-row-text div:first-child{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .confirm-list{list-style:none; margin:14px 0 0; padding:0; max-height:220px; overflow-y:auto; font-size:13px;}
+  .confirm-list li{display:flex; justify-content:space-between; gap:10px; padding:7px 0; border-bottom:1px solid var(--line);}
+  .confirm-list li:last-child{border-bottom:none;}
+  .confirm-note{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
   .topbar{display:flex; justify-content:space-between; align-items:center;}
   .install-btn{display:none; font-size:13px; padding:7px 12px;}
   .install-btn.show{display:inline-block;}
@@ -143,8 +156,11 @@
   var panelOpen = null; // 'setup' | 'settings' | null
   var activeTag = null;
   var tagBreakdownOpen = false;
+  var mode = 'view'; // 'view' | 'edit' | 'delete'
   var editingId = null;
   var selectedId = null;
+  var deleteSelection = [];
+  var pendingDelete = null; // array of expense ids awaiting delete confirmation, or null
   var dailyMode = 'dynamic'; // 'dynamic' | 'static'
   var heroJustSwitched = false;
   var calc = {};
@@ -202,7 +218,12 @@
         : activeTag === UNTAGGED ? inCycleAll.filter(function(e){ return !(e.tags && e.tags.length); })
         : inCycleAll.filter(function(e){ return (e.tags||[]).indexOf(activeTag) > -1; });
 
-      html += '<div class="section-title">This cycle</div>';
+      html += '<div class="section-title"><span>This cycle</span><div class="mode-switch">'
+        + ['view','edit','delete'].map(function(m){
+            var icon = m==='view' ? '\u{1F441}' : (m==='edit' ? '\u270E' : '\u{1F5D1}');
+            return '<button type="button" data-act="setMode" data-mode="' + m + '" class="' + (mode===m?'active':'') + '" title="' + m + '" aria-label="' + m + ' mode">' + icon + '</button>';
+          }).join('')
+        + '</div></div>';
       if (allTags.length){
         var hasUntagged = inCycleAll.some(function(e){ return !(e.tags && e.tags.length); });
         var chipKeys = hasUntagged ? allTags.concat([UNTAGGED]) : allTags;
@@ -229,28 +250,45 @@
             }).join('')
           + '</details>';
       }
+      if (mode === 'delete') deleteSelection = deleteSelection.filter(function(id){ return inCycle.some(function(e){ return e.id===id; }); });
+
       if (inCycle.length === 0){
         html += '<div class="empty">' + (activeTag ? 'No expenses tagged #' + activeTag + ' this cycle.' : 'No expenses logged yet this cycle.') + '</div>';
       } else {
-        html += (state.quickEditEnabled ? '<div class="hint" style="margin:0 0 8px;">Double-tap an entry to edit</div>' : '');
+        if (mode === 'edit'){
+          html += '<div class="hint" style="margin:0 0 8px;">Double-tap an entry to edit it</div>';
+        }
+        if (mode === 'delete' && deleteSelection.length){
+          html += '<div class="row" style="margin:0 0 10px; font-size:13px;"><span>' + deleteSelection.length + ' selected</span>'
+            + '<button type="button" class="danger" data-act="bulkDelete" style="padding:6px 14px; font-size:13px;">Delete</button></div>';
+        }
         html += '<ul class="expenses">' + inCycle.map(function(e){
-          if (editingId === e.id){
+          var d = new Date(e.ts);
+          var dateStr = d.toLocaleDateString('en-GB',{day:'numeric',month:'short'});
+          var tags = (e.tags||[]).map(function(t){ return '<span class="tag-chip">#' + t + '</span>'; }).join('');
+
+          if (mode === 'edit' && editingId === e.id){
             var fullText = e.note + ((e.tags && e.tags.length) ? ' ' + e.tags.map(function(t){ return '#'+t; }).join(' ') : '');
             return '<li class="editing"><form class="edit-form" data-act="editForm" data-id="' + e.id + '">'
               + '<input type="number" step="0.01" min="0.01" class="edit-amt" value="' + e.amount + '" required>'
               + '<input type="text" class="edit-note" value="' + escapeAttr(fullText) + '" placeholder="What for? #tag to tag it">'
               + '<div class="edit-actions">'
-              + '<button type="button" class="ghost" data-act="deleteEdit" data-id="' + e.id + '">Delete</button>'
+              + '<button type="button" class="ghost danger-text" data-act="deleteEdit" data-id="' + e.id + '">Delete</button>'
               + '<button type="button" class="ghost" data-act="cancelEdit">Cancel</button>'
               + '<button type="submit">Save</button>'
               + '</div></form></li>';
           }
-          var d = new Date(e.ts);
-          var tags = (e.tags||[]).map(function(t){ return '<span class="tag-chip">#' + t + '</span>'; }).join('');
-          return '<li class="' + (selectedId===e.id?'selected':'') + '" data-act="editRow" data-id="' + e.id + '"><div><div>' + (e.note || 'Expense') + '</div>'
-            + '<div class="note">' + d.toLocaleDateString('en-GB',{day:'numeric',month:'short'}) + tags + '</div></div>'
-            + '<div class="row" style="gap:10px;"><span>' + THB2.format(e.amount) + '</span>'
-            + '<button class="icon" data-act="del" data-id="' + e.id + '">&times;</button></div></li>';
+
+          if (mode === 'delete'){
+            return '<li><label class="del-row"><input type="checkbox" data-act="delCheck" data-id="' + e.id + '"' + (deleteSelection.indexOf(e.id)>-1?' checked':'') + '>'
+              + '<span class="del-row-text"><div>' + (e.note || 'Expense') + tags + '</div><div class="note">' + dateStr + '</div></span>'
+              + '<span>' + THB2.format(e.amount) + '</span></label></li>';
+          }
+
+          var clickAct = mode === 'edit' ? 'editRow' : 'viewRow';
+          return '<li class="' + (mode==='view' && selectedId===e.id?'selected':'') + '" data-act="' + clickAct + '" data-id="' + e.id + '"><div><div>' + (e.note || 'Expense') + '</div>'
+            + '<div class="note">' + dateStr + tags + '</div></div>'
+            + '<div>' + THB2.format(e.amount) + '</div></li>';
         }).join('') + '</ul>';
       }
     }
@@ -265,12 +303,26 @@
         + '<label for="rdInput">Resets on day of month</label>'
         + '<input type="number" min="1" max="31" id="rdInput" value="' + rd + '" placeholder="1">'
         + '<div class="hint">E.g. if you get paid on the 25th, set this to 25.</div>'
-        + '<label style="display:flex; align-items:center; gap:8px; margin-top:16px; cursor:pointer; font-size:14px;">'
-        + '<input type="checkbox" id="qeInput" style="width:auto;"' + (state && state.quickEditEnabled ? ' checked' : '') + '> Double-tap an entry to edit it'
-        + '</label>'
         + '<div class="actions">'
         + (panelOpen==='settings' ? '<button class="ghost" data-act="cancelPanel">Cancel</button>' : '')
         + '<button data-act="savePanel">Save</button>'
+        + '</div></div></div>';
+    }
+
+    if (pendingDelete && state){
+      var delItems = pendingDelete
+        .map(function(id){ return state.expenses.find(function(x){ return x.id === id; }); })
+        .filter(Boolean);
+      html += '<div class="panel"><div class="card">'
+        + '<h2>Delete ' + (delItems.length > 1 ? delItems.length + ' expenses?' : 'this expense?') + '</h2>'
+        + '<ul class="confirm-list">' + delItems.map(function(e){
+            var dd = new Date(e.ts);
+            return '<li><span class="confirm-note">' + dd.toLocaleDateString('en-GB',{day:'numeric',month:'short'}) + ' \u00b7 ' + (e.note || 'Expense') + '</span>'
+              + '<span>' + THB2.format(e.amount) + '</span></li>';
+          }).join('') + '</ul>'
+        + '<div class="actions">'
+        + '<button type="button" class="ghost" data-act="cancelDelete">Cancel</button>'
+        + '<button type="button" class="danger" data-act="confirmDelete">Delete</button>'
         + '</div></div></div>';
     }
 
@@ -342,32 +394,58 @@
         render();
       }, 170);
     });
-    app.querySelectorAll('[data-act="del"]').forEach(function(btn){
-      btn.addEventListener('click', function(){
-        state.expenses = state.expenses.filter(function(e){ return e.id !== btn.dataset.id; });
-        save(state);
-        render();
-      });
-    });
     app.querySelectorAll('[data-act="tagfilter"]').forEach(function(btn){
       btn.addEventListener('click', function(){
         activeTag = (activeTag === btn.dataset.tag) ? null : btn.dataset.tag;
         render();
       });
     });
-    app.querySelectorAll('li[data-act="editRow"]').forEach(function(li){
-      li.addEventListener('click', function(ev){
-        if (ev.target.closest('[data-act="del"]')) return;
+    app.querySelectorAll('[data-act="setMode"]').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        mode = btn.dataset.mode;
+        editingId = null;
+        selectedId = null;
+        deleteSelection = [];
+        render();
+      });
+    });
+    app.querySelectorAll('li[data-act="viewRow"]').forEach(function(li){
+      li.addEventListener('click', function(){
         selectedId = (selectedId === li.dataset.id) ? null : li.dataset.id;
         render();
       });
-      li.addEventListener('dblclick', function(ev){
-        if (!(state && state.quickEditEnabled)) return;
-        if (ev.target.closest('[data-act="del"]')) return;
-        selectedId = null;
+    });
+    app.querySelectorAll('li[data-act="editRow"]').forEach(function(li){
+      li.addEventListener('dblclick', function(){
         editingId = li.dataset.id;
         render();
       });
+    });
+    app.querySelectorAll('[data-act="delCheck"]').forEach(function(cb){
+      cb.addEventListener('change', function(){
+        var id = cb.dataset.id;
+        var i = deleteSelection.indexOf(id);
+        if (cb.checked && i === -1) deleteSelection.push(id);
+        if (!cb.checked && i > -1) deleteSelection.splice(i, 1);
+        render();
+      });
+    });
+    var bulkDeleteBtn = app.querySelector('[data-act="bulkDelete"]');
+    if (bulkDeleteBtn) bulkDeleteBtn.addEventListener('click', function(){
+      pendingDelete = deleteSelection.slice();
+      render();
+    });
+    var cancelDeleteBtn = app.querySelector('[data-act="cancelDelete"]');
+    if (cancelDeleteBtn) cancelDeleteBtn.addEventListener('click', function(){ pendingDelete = null; render(); });
+    var confirmDeleteBtn = app.querySelector('[data-act="confirmDelete"]');
+    if (confirmDeleteBtn) confirmDeleteBtn.addEventListener('click', function(){
+      var ids = pendingDelete || [];
+      state.expenses = state.expenses.filter(function(x){ return ids.indexOf(x.id) === -1; });
+      save(state);
+      pendingDelete = null;
+      editingId = null;
+      deleteSelection = [];
+      render();
     });
     var editForm = app.querySelector('[data-act="editForm"]');
     if (editForm){
@@ -389,9 +467,7 @@
     var deleteEdit = app.querySelector('[data-act="deleteEdit"]');
     if (deleteEdit){
       deleteEdit.addEventListener('click', function(){
-        state.expenses = state.expenses.filter(function(x){ return x.id !== deleteEdit.dataset.id; });
-        save(state);
-        editingId = null;
+        pendingDelete = [deleteEdit.dataset.id];
         render();
       });
     }
@@ -412,7 +488,6 @@
       if (!state) state = { expenses: [] };
       state.monthlyBudget = mb;
       state.refreshDay = rd;
-      state.quickEditEnabled = document.getElementById('qeInput').checked;
       save(state);
       panelOpen = null;
       render();
