@@ -257,9 +257,7 @@
       if (!acct.expenses) return;
       acct.expenses.forEach(function(exp){
         if ((exp.tags || []).indexOf('transfer') > -1){
-          // Zero out amount so it never double-counts with transferDelta
           exp.amount = 0;
-          // Attempt to link legacy transfer without transferId
           if (!exp.transferId && s.transfers.length){
             var match = s.transfers.find(function(t){ return Math.abs(t.ts - exp.ts) < 5000; });
             if (match) exp.transferId = match.id;
@@ -292,7 +290,7 @@
 
   // --- Helper: get current active account ---
   function getActiveAccount(){
-    if (!state || !state.accounts) return null;
+    if (!state || !state.accounts || state.activeAccountId === 'combined') return null;
     return state.accounts.find(function(a){ return a.id === state.activeAccountId; }) || state.accounts[0] || null;
   }
   function getAccountById(id){
@@ -302,12 +300,7 @@
   function genId(prefix){
     return (prefix || 'id') + '-' + Date.now() + '-' + Math.random().toString(36).substr(2,6);
   }
-  function acctColor(idx){
-    var colors = ['var(--gold)','var(--teal)','var(--peach)','var(--sky)','var(--rose)','var(--pos)','var(--neg)'];
-    return colors[idx % colors.length];
-  }
 
-  // --- Compute effective balance for a tracking account (initial + transfers in - transfers out) ---
   function trackingBalance(acct){
     var bal = acct.balance || 0;
     if (!state.transfers) return bal;
@@ -318,7 +311,6 @@
     return bal;
   }
 
-  // --- Compute effective remaining for budget account (monthlyBudget - spent + transfers in - transfers out within cycle) ---
   function budgetRemaining(acct, cyc){
     var spent = acct.expenses
       .filter(function(e){ return e.ts >= cyc.start.getTime() && e.ts < cyc.end.getTime(); })
@@ -346,10 +338,8 @@
       html += renderBudgetTab(today);
     }
 
-    // Panels
     html += renderPanels(today);
 
-    // Bottom nav
     html += '<div class="bottom-nav"><div class="bottom-nav-inner">'
       + '<button type="button" data-act="switchTab" data-tab="budget" class="' + (currentTab==='budget'?'active':'') + '"><span class="nav-icon">\u{1F4B0}</span>Budget</button>'
       + '<button type="button" data-act="switchTab" data-tab="accounts" class="' + (currentTab==='accounts'?'active':'') + '"><span class="nav-icon">\u{1F3E6}</span>Accounts</button>'
@@ -371,88 +361,122 @@
   // ===== BUDGET TAB (the original main view) =====
   function renderBudgetTab(today){
     var html = '';
+    var budgetAccts = state && state.accounts ? state.accounts.filter(function(a){ return a.type === 'budget'; }) : [];
+    
+    if (budgetAccts.length === 0){
+      html += '<div class="empty" style="padding:40px 0;">No budget accounts yet.<br>Go to Accounts tab to create one.</div>';
+      return html;
+    }
+
+    var isCombined = state.activeAccountId === 'combined';
+    if (isCombined && budgetAccts.length < 2) {
+        state.activeAccountId = budgetAccts[0].id;
+        isCombined = false;
+        save(state);
+    }
+
     var acct = getActiveAccount();
-    if (!acct || acct.type !== 'budget'){
-      // No budget account selected — prompt to pick one or create
-      var budgetAccts = state && state.accounts ? state.accounts.filter(function(a){ return a.type === 'budget'; }) : [];
-      if (budgetAccts.length === 0){
-        html += '<div class="empty" style="padding:40px 0;">No budget accounts yet.<br>Go to Accounts tab to create one.</div>';
-        return html;
-      }
-      // Auto-select first budget account
+    if (!isCombined && (!acct || acct.type !== 'budget')){
       state.activeAccountId = budgetAccts[0].id;
       acct = budgetAccts[0];
       save(state);
     }
 
-    // Account selector (if multiple budget accounts)
-    var budgetAccts = state.accounts.filter(function(a){ return a.type === 'budget'; });
     if (budgetAccts.length > 1){
       html += '<div style="margin-bottom:16px; text-align:left;">'
-        + '<select id="acctSelector" style="width:100%;">'
+        + '<select id="acctSelector" style="width:100%; font-weight:600;">'
+        + '<option value="combined"' + (isCombined?' selected':'') + '>Total Combined Budget</option>'
         + budgetAccts.map(function(a){
-            return '<option value="' + a.id + '"' + (a.id===acct.id?' selected':'') + '>' + escapeAttr(a.name) + '</option>';
+            return '<option value="' + a.id + '"' + (!isCombined && a.id===acct.id?' selected':'') + '>' + escapeAttr(a.name) + '</option>';
           }).join('')
         + '</select></div>';
     }
 
-    var cyc = cycleFor(acct.refreshDay, today);
-    var spent = acct.expenses
-      .filter(function(e){ return e.ts >= cyc.start.getTime() && e.ts < cyc.end.getTime(); })
-      .reduce(function(a,e){ return a + e.amount; }, 0);
-    var spentToday = acct.expenses
-      .filter(function(e){ return e.ts >= today.getTime(); })
-      .reduce(function(a,e){ return a + e.amount; }, 0);
-
-    // Factor in transfers for this cycle
-    var transferDelta = 0;
-    if (state.transfers){
-      state.transfers.forEach(function(t){
-        if (t.ts >= cyc.start.getTime() && t.ts < cyc.end.getTime()){
-          if (t.toId === acct.id) transferDelta += t.amount;
-          if (t.fromId === acct.id) transferDelta -= t.amount;
-        }
-      });
+    // Build Virtual Account if combined
+    var displayAcct = acct;
+    if (isCombined) {
+        displayAcct = {
+            id: 'combined',
+            name: 'Total Combined Budget',
+            type: 'budget',
+            refreshDay: budgetAccts[0].refreshDay,
+            endDate: budgetAccts[0].endDate,
+            monthlyBudget: budgetAccts.reduce(function(acc, a){ return acc + a.monthlyBudget; }, 0),
+            expenses: []
+        };
+        budgetAccts.forEach(function(a){
+            a.expenses.forEach(function(e){
+                var copy = Object.assign({}, e);
+                copy._acctId = a.id;
+                copy._acctName = a.name;
+                displayAcct.expenses.push(copy);
+            });
+        });
     }
 
-    var remaining = acct.monthlyBudget - spent + transferDelta;
+    var cyc = cycleFor(displayAcct.refreshDay, today);
+    var remaining = 0;
+    var spentToday = 0;
+
+    if (isCombined) {
+        budgetAccts.forEach(function(ba) {
+            var baSpentToday = ba.expenses
+                .filter(function(e){ return e.ts >= today.getTime(); })
+                .reduce(function(a,e){ return a + e.amount; }, 0);
+            spentToday += baSpentToday;
+            remaining += budgetRemaining(ba, cyc);
+        });
+    } else {
+        spentToday = displayAcct.expenses
+            .filter(function(e){ return e.ts >= today.getTime(); })
+            .reduce(function(a,e){ return a + e.amount; }, 0);
+        remaining = budgetRemaining(displayAcct, cyc);
+    }
+
     var daysLeft = Math.max(1, Math.round((cyc.end - today) / 86400000));
     var dynamicDaily = remaining / daysLeft;
-    var staticDaily = (acct.monthlyBudget - (spent - spentToday) + transferDelta) / daysLeft;
+    var staticDaily = (remaining + spentToday) / daysLeft;
     var daily = dailyMode === 'static' ? staticDaily : dynamicDaily;
     var over = daily < 0;
     calc.remaining = remaining;
     calc.daysLeft = daysLeft;
 
+    var gearHtml = isCombined ? '' : '<button class="gear" data-act="settings">⚙</button>';
     html += '<div class="hero">'
-      + '<div class="row topbar"><div style="display:flex; gap:8px;"><button class="ghost install-btn" id="installBtn" type="button">Download app</button><button class="ghost" data-act="export" type="button">Export</button></div><button class="gear" data-act="settings">⚙</button></div>'
+      + '<div class="row topbar"><div style="display:flex; gap:8px;"><button class="ghost install-btn" id="installBtn" type="button">Download app</button><button class="ghost" data-act="export" type="button">Export</button></div>' + gearHtml + '</div>'
       + '<div class="install-help" id="installHelp"></div>'
       + '<div class="num display' + (over?' neg-flag':'') + (heroJustSwitched?' num-in':'') + '" id="heroNum">' + THB2.format(daily) + ' <small>/ day</small></div>'
-      + '<div class="sub">' + daysLeft + ' day' + (daysLeft===1?'':'s') + ' until refresh &middot; ' + THB2.format(remaining) + ' left of ' + THB2.format(acct.monthlyBudget) + '</div>'
+      + '<div class="sub">' + daysLeft + ' day' + (daysLeft===1?'':'s') + ' until refresh &middot; ' + THB2.format(remaining) + ' left of ' + THB2.format(displayAcct.monthlyBudget) + '</div>'
       + '<div class="sub" style="font-size:12px; margin-top:2px;">' + (dailyMode==='static' ? 'Static \u2014 excludes today\u2019s spending' : 'Dynamic \u2014 includes today\u2019s spending') + ' (tap to switch)</div>';
 
-    // Show end date info if account has one
-    if (acct.endDate){
-      var parts = acct.endDate.split('-');
+    if (displayAcct.endDate){
+      var parts = displayAcct.endDate.split('-');
       var endD = new Date(parts[0], parts[1]-1, parts[2]);
       endD.setHours(0,0,0,0);
       var totalDaysToEnd = Math.max(0, Math.round((endD - today) / 86400000));
       html += '<div class="sub" style="font-size:12px; margin-top:4px; color:' + (totalDaysToEnd <= 7 ? 'var(--neg)' : 'var(--muted)') + ';">'
-        + '\u{1F4C5} Account ends ' + endD.toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})
+        + '\u{1F4C5} ' + (isCombined ? 'Budgets end ' : 'Account ends ') + endD.toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})
         + ' (' + totalDaysToEnd + ' day' + (totalDaysToEnd===1?'':'s') + ' left)</div>';
     }
 
     html += '</div>';
 
     html += '<div class="section-title">Add expense</div>'
-      + '<form class="add" id="addForm">'
-      + '<input class="amt-input" type="number" step="0.01" min="0.01" placeholder="0.00" id="amtInput" required>'
-      + '<input type="text" placeholder="What for? #tag to tag it" id="noteInput">'
-      + '<button type="submit">Add</button>'
+      + '<form class="add" id="addForm" data-combined="' + (isCombined?'true':'false') + '">';
+    
+    if (isCombined) {
+      html += '<select id="addFormAcct" style="flex:1; max-width:95px; padding:10px 6px; font-size:13px;">'
+        + budgetAccts.map(function(a){ return '<option value="' + a.id + '">' + escapeAttr(a.name) + '</option>'; }).join('')
+        + '</select>';
+    }
+    
+    html += '<input type="number" step="0.01" min="0.01" placeholder="0.00" id="amtInput" required style="flex:1; max-width:' + (isCombined?'85px':'110px') + '; padding:10px 8px;">'
+      + '<input type="text" placeholder="What for? #tag to tag it" id="noteInput" style="flex:2; min-width:0;">'
+      + '<button type="submit" style="padding:10px 14px;">Add</button>'
       + '</form>'
       + '<div class="hint" id="impactHint" style="margin:-8px 0 14px; min-height:1em;"></div>';
 
-    var inCycleAll = acct.expenses
+    var inCycleAll = displayAcct.expenses
       .filter(function(e){ return e.ts >= cyc.start.getTime() && e.ts < cyc.end.getTime(); })
       .sort(function(a,b){ return b.ts - a.ts; });
 
@@ -461,7 +485,6 @@
     var UNTAGGED = '__untagged__';
     var hasUntagged = inCycleAll.some(function(e){ return !(e.tags && e.tags.length); });
 
-    // Automatically drop the tag filter if the untagged state becomes empty
     if (activeTag === UNTAGGED && !hasUntagged) activeTag = null;
     else if (activeTag && activeTag !== UNTAGGED && allTags.indexOf(activeTag) === -1) activeTag = null;
 
@@ -475,6 +498,7 @@
           return '<button type="button" data-act="setMode" data-mode="' + m + '" class="' + (mode===m?'active':'') + '" title="' + m + '" aria-label="' + m + ' mode">' + icon + '</button>';
         }).join('')
       + '</div></div>';
+      
     if (allTags.length){
       var chipKeys = hasUntagged ? allTags.concat([UNTAGGED]) : allTags;
 
@@ -516,10 +540,13 @@
       html += '<ul class="expenses">' + inCycle.map(function(e){
         var d = new Date(e.ts);
         var dateStr = d.toLocaleDateString('en-GB',{day:'numeric',month:'short'});
-        var tags = (e.tags||[]).map(function(t){
+        
+        var acctBadge = (isCombined && e._acctName) ? '<span class="tag-chip" style="color:var(--text); border-color:var(--line); opacity:0.75;">' + escapeAttr(e._acctName) + '</span> ' : '';
+        var tagsStr = (e.tags||[]).map(function(t){
           var isTransfer = t === 'transfer';
           return '<span class="tag-chip' + (isTransfer ? ' transfer-chip' : '') + '">#' + t + '</span>';
         }).join('');
+        var fullTagsStr = acctBadge + tagsStr;
 
         var isTransferEntry = (e.tags||[]).indexOf('transfer') > -1;
         var amtDisplay = (isTransferEntry && e.amount === 0) ? '⇄' : THB2.format(e.amount);
@@ -546,13 +573,13 @@
 
         if (mode === 'delete'){
           return '<li><label class="del-row"><input type="checkbox" data-act="delCheck" data-id="' + e.id + '"' + (deleteSelection.indexOf(e.id)>-1?' checked':'') + '>'
-            + '<span class="del-row-text"><div>' + escapeAttr(e.note || 'Expense') + tags + '</div><div class="note">' + dateStr + '</div></span>'
+            + '<span class="del-row-text"><div>' + escapeAttr(e.note || 'Expense') + fullTagsStr + '</div><div class="note">' + dateStr + '</div></span>'
             + '<span>' + amtDisplay + '</span></label></li>';
         }
 
         var clickAct = mode === 'edit' ? 'editRow' : 'viewRow';
         return '<li class="' + (mode==='view' && selectedId===e.id?'selected':'') + '" data-act="' + clickAct + '" data-id="' + e.id + '"><div><div>' + escapeAttr(e.note || 'Expense') + '</div>'
-          + '<div class="note">' + dateStr + tags + '</div></div>'
+          + '<div class="note">' + dateStr + fullTagsStr + '</div></div>'
           + '<div>' + amtDisplay + '</div></li>';
       }).join('') + '</ul>';
     }
@@ -565,7 +592,6 @@
     var html = '';
     var accounts = state && state.accounts ? state.accounts : [];
 
-    // Total balance across all accounts
     var totalBal = 0;
     accounts.forEach(function(a){
       if (a.type === 'tracking'){
@@ -581,7 +607,6 @@
       + '<div class="total-bar-amount display">' + THB2.format(totalBal) + '</div>'
       + '</div>';
 
-    // Action buttons
     html += '<div class="fab-row">'
       + '<button type="button" data-act="openAddAccount">+ Account</button>'
       + '<button type="button" class="ghost" data-act="openTransfer" style="border-color:var(--teal); color:var(--teal);">\u21C4 Transfer</button>'
@@ -630,7 +655,6 @@
     });
     html += '</div>';
 
-    // Recent transfers
     if (state.transfers && state.transfers.length > 0){
       var recent = state.transfers.slice().sort(function(a,b){ return b.ts - a.ts; }).slice(0, 10);
       html += '<div class="section-title">Recent transfers</div>';
@@ -659,7 +683,6 @@
     var html = '';
     var acct = getActiveAccount();
 
-    // Setup / Settings panel (for current budget account)
     if (panelOpen === 'setup' || panelOpen === 'settings'){
       var mb = acct && acct.type === 'budget' ? acct.monthlyBudget : '';
       var rd = acct && acct.type === 'budget' ? acct.refreshDay : '';
@@ -670,7 +693,7 @@
         + '<input type="number" min="0.01" step="0.01" id="mbInput" value="' + mb + '" placeholder="15000">'
         + '<label for="rdInput">Resets on day of month</label>'
         + '<input type="number" min="1" max="31" id="rdInput" value="' + rd + '" placeholder="1">'
-        + '<div class="hint">E.g. if you get paid on the 25th, set this to 25.</div>'
+        + '<div class="hint">E.g. if you get paid on the 25th, set this to 25. Note: Editing this links the cycle of all your budget accounts.</div>'
         + '<label for="edInput">End date (optional)</label>'
         + '<input type="date" id="edInput" value="' + ed + '">'
         + '<div class="hint">Leave empty for no end date.</div>'
@@ -680,7 +703,6 @@
         + '</div></div></div>';
     }
 
-    // Add Account panel
     if (panelOpen === 'addAccount'){
       html += '<div class="panel"><div class="card">'
         + '<h2>New Account</h2>'
@@ -689,16 +711,21 @@
         + '<button type="button" data-act="setNewType" data-type="budget" class="' + (newAccountType==='budget'?'active':'') + '">Budget</button>'
         + '<button type="button" data-act="setNewType" data-type="tracking" class="' + (newAccountType==='tracking'?'active':'') + '">Tracking</button>'
         + '</div>'
-        + '<div class="hint" style="margin-top:8px;">' + (newAccountType==='budget' ? 'Has its own expense list, daily budget, and auto-refresh cycle.' : 'Tracks a balance. Good for bank accounts, savings, or cash on hand.') + '</div>'
+        + '<div class="hint" style="margin-top:8px;">' + (newAccountType==='budget' ? 'Has its own expense list and daily budget. Cycles are automatically synced together.' : 'Tracks a balance. Good for bank accounts, savings, or cash on hand.') + '</div>'
         + '<label for="newAcctName">Account name</label>'
         + '<input type="text" id="newAcctName" placeholder="e.g. Savings, Cash, Food Budget">';
       if (newAccountType === 'budget'){
+        // If we already have a budget account, prepopulate the synced refresh date visually
+        var existingBudget = state && state.accounts && state.accounts.find(function(a){ return a.type === 'budget'; });
+        var defRd = existingBudget ? existingBudget.refreshDay : '';
+        var defEd = existingBudget && existingBudget.endDate ? existingBudget.endDate : '';
+        
         html += '<label for="newAcctBudget">Monthly budget (THB)</label>'
           + '<input type="number" id="newAcctBudget" min="0.01" step="0.01" placeholder="15000">'
-          + '<label for="newAcctRefresh">Resets on day of month</label>'
-          + '<input type="number" id="newAcctRefresh" min="1" max="31" placeholder="1">'
+          + '<label for="newAcctRefresh">Resets on day of month (Synced to all)</label>'
+          + '<input type="number" id="newAcctRefresh" min="1" max="31" placeholder="1" value="' + defRd + '">'
           + '<label for="newAcctEnd">End date (optional)</label>'
-          + '<input type="date" id="newAcctEnd">';
+          + '<input type="date" id="newAcctEnd" value="' + defEd + '">';
       } else {
         html += '<label for="newAcctBal">Current balance (THB)</label>'
           + '<input type="number" id="newAcctBal" min="0" step="0.01" placeholder="0.00">';
@@ -709,7 +736,6 @@
         + '</div></div></div>';
     }
 
-    // Edit Account panel
     if (panelOpen === 'editAccount' && editingAccountId){
       var ea = getAccountById(editingAccountId);
       if (ea){
@@ -720,7 +746,7 @@
         if (ea.type === 'budget'){
           html += '<label for="editAcctBudget">Monthly budget (THB)</label>'
             + '<input type="number" id="editAcctBudget" min="0.01" step="0.01" value="' + ea.monthlyBudget + '">'
-            + '<label for="editAcctRefresh">Resets on day of month</label>'
+            + '<label for="editAcctRefresh">Resets on day of month (Synced to all)</label>'
             + '<input type="number" id="editAcctRefresh" min="1" max="31" value="' + ea.refreshDay + '">'
             + '<label for="editAcctEnd">End date (optional)</label>'
             + '<input type="date" id="editAcctEnd" value="' + (ea.endDate || '') + '">';
@@ -737,7 +763,6 @@
       }
     }
 
-    // Transfer panel
     if (panelOpen === 'transfer'){
       var accounts = state && state.accounts ? state.accounts : [];
       if (accounts.length < 2){
@@ -764,13 +789,22 @@
       }
     }
 
-    // Delete confirmation panel
     if (pendingDelete && state){
-      var acct = getActiveAccount();
-      if (acct && acct.type === 'budget'){
-        var delItems = pendingDelete
-          .map(function(id){ return acct.expenses.find(function(x){ return x.id === id; }); })
-          .filter(Boolean);
+      // Support combined budget global sweeps
+      var delItems = [];
+      state.accounts.forEach(function(a){
+          if (a.type === 'budget') {
+              a.expenses.forEach(function(x){
+                  if (pendingDelete.indexOf(x.id) > -1) {
+                      var copy = Object.assign({}, x);
+                      copy._acctName = a.name;
+                      delItems.push(copy);
+                  }
+              });
+          }
+      });
+      
+      if (delItems.length > 0){
         html += '<div class="panel"><div class="card">'
           + '<h2>Delete ' + (delItems.length > 1 ? delItems.length + ' expenses?' : 'this expense?') + '</h2>'
           + '<ul class="confirm-list">' + delItems.map(function(e){
@@ -821,16 +855,13 @@
 
   // ===== WIRE EVENTS =====
   function wire(){
-    // Tab switching
     app.querySelectorAll('[data-act="switchTab"]').forEach(function(btn){
       btn.addEventListener('click', function(){ currentTab = btn.dataset.tab; render(); });
     });
-    // Bottom nav buttons (outside #app)
     document.querySelectorAll('.bottom-nav [data-act="switchTab"]').forEach(function(btn){
       btn.addEventListener('click', function(){ currentTab = btn.dataset.tab; render(); });
     });
 
-    // Account selector
     var acctSel = document.getElementById('acctSelector');
     if (acctSel) acctSel.addEventListener('change', function(){
       state.activeAccountId = acctSel.value;
@@ -838,7 +869,6 @@
       render();
     });
 
-    // Add form
     var addForm = document.getElementById('addForm');
     if (addForm){
       addForm.addEventListener('submit', function(ev){
@@ -848,13 +878,18 @@
         var noteRaw = document.getElementById('noteInput').value.trim();
         var tags = [];
         var note = noteRaw.replace(/#([\w-]+)/g, function(m, t){ tags.push(t.toLowerCase()); return ''; }).replace(/\s+/g,' ').trim();
-        var acct = getActiveAccount();
-        if (!acct || acct.type !== 'budget') return;
-        acct.expenses.push({ id: genId('exp'), amount: amt, note: note, tags: tags, ts: Date.now() });
+        
+        var isCombined = addForm.dataset.combined === 'true';
+        var targetId = isCombined ? document.getElementById('addFormAcct').value : state.activeAccountId;
+        var targetAcct = state.accounts.find(function(a){ return a.id === targetId; });
+        
+        if (!targetAcct || targetAcct.type !== 'budget') return;
+        targetAcct.expenses.push({ id: genId('exp'), amount: amt, note: note, tags: tags, ts: Date.now() });
         save(state);
         render();
       });
     }
+
     var amtInput = document.getElementById('amtInput');
     if (amtInput) amtInput.addEventListener('input', updateImpactHint);
     var heroNum = document.getElementById('heroNum');
@@ -909,45 +944,55 @@
     });
     var cancelDeleteBtn = app.querySelector('[data-act="cancelDelete"]');
     if (cancelDeleteBtn) cancelDeleteBtn.addEventListener('click', function(){ pendingDelete = null; render(); });
+    
     var confirmDeleteBtn = app.querySelector('[data-act="confirmDelete"]');
     if (confirmDeleteBtn) confirmDeleteBtn.addEventListener('click', function(){
       var ids = pendingDelete || [];
-      var acct = getActiveAccount();
-      if (acct && acct.type === 'budget'){
-        // Find transfer IDs linked to expenses being deleted
-        var transferIds = [];
-        ids.forEach(function(expId){
-          var exp = acct.expenses.find(function(x){ return x.id === expId; });
-          if (exp){
-            if (exp.transferId){
-              transferIds.push(exp.transferId);
-            } else if ((exp.tags || []).indexOf('transfer') > -1 && state.transfers){
-              var match = state.transfers.find(function(t){ return Math.abs(t.ts - exp.ts) < 5000; });
-              if (match) transferIds.push(match.id);
-            }
-          }
+      var transferIds = [];
+      
+      // Look across all budget accounts for linked transfers
+      ids.forEach(function(expId){
+        var exp = null;
+        state.accounts.forEach(function(a){
+           if (a.type === 'budget') {
+               var found = a.expenses.find(function(x){ return x.id === expId; });
+               if (found) exp = found;
+           }
         });
-        // Remove the expenses
-        acct.expenses = acct.expenses.filter(function(x){ return ids.indexOf(x.id) === -1; });
-        // Clean up linked transfers and their sibling expenses on other accounts
-        if (transferIds.length && state.transfers){
-          state.transfers = state.transfers.filter(function(t){ return transferIds.indexOf(t.id) === -1; });
-          // Remove sibling transfer expenses from other accounts
-          state.accounts.forEach(function(otherAcct){
-            if (otherAcct.id === acct.id) return;
-            if (!otherAcct.expenses) return;
-            otherAcct.expenses = otherAcct.expenses.filter(function(x){
-              return !x.transferId || transferIds.indexOf(x.transferId) === -1;
-            });
-          });
+        if (exp){
+          if (exp.transferId){
+            transferIds.push(exp.transferId);
+          } else if ((exp.tags || []).indexOf('transfer') > -1 && state.transfers){
+            var match = state.transfers.find(function(t){ return Math.abs(t.ts - exp.ts) < 5000; });
+            if (match) transferIds.push(match.id);
+          }
         }
+      });
+      
+      // Apply deletion to all budget accounts globally
+      state.accounts.forEach(function(a){
+          if (a.type === 'budget') {
+              a.expenses = a.expenses.filter(function(x){ return ids.indexOf(x.id) === -1; });
+              
+              if (transferIds.length && state.transfers){
+                 a.expenses = a.expenses.filter(function(x){
+                    return !x.transferId || transferIds.indexOf(x.transferId) === -1;
+                 });
+              }
+          }
+      });
+
+      if (transferIds.length && state.transfers){
+        state.transfers = state.transfers.filter(function(t){ return transferIds.indexOf(t.id) === -1; });
       }
+
       save(state);
       pendingDelete = null;
       editingId = null;
       deleteSelection = [];
       render();
     });
+
     var editForm = app.querySelector('[data-act="editForm"]');
     if (editForm){
       editForm.addEventListener('submit', function(ev){
@@ -957,10 +1002,20 @@
         var raw = editForm.querySelector('.edit-note').value.trim();
         var tags = [];
         var note = raw.replace(/#([\w-]+)/g, function(m,t){ tags.push(t.toLowerCase()); return ''; }).replace(/\s+/g,' ').trim();
-        var acct = getActiveAccount();
-        if (!acct) return;
-        var exp = acct.expenses.find(function(x){ return x.id === editForm.dataset.id; });
-        if (exp){ exp.amount = amt; exp.note = note; exp.tags = tags; save(state); }
+        
+        // Find which account holds this expense (universal edit support)
+        var targetExp = null;
+        state.accounts.forEach(function(a){
+           if(a.type === 'budget'){
+             var found = a.expenses.find(function(x){ return x.id === editForm.dataset.id; });
+             if (found){ targetExp = found; }
+           }
+        });
+        
+        if (targetExp){
+            targetExp.amount = amt; targetExp.note = note; targetExp.tags = tags; 
+            save(state);
+        }
         editingId = null;
         render();
       });
@@ -983,6 +1038,7 @@
     if (gear) gear.addEventListener('click', function(){ panelOpen = 'settings'; render(); });
     var cancel = app.querySelector('[data-act="cancelPanel"]');
     if (cancel) cancel.addEventListener('click', function(){ panelOpen = null; editingAccountId = null; render(); });
+    
     var saveBtn = app.querySelector('[data-act="savePanel"]');
     if (saveBtn) saveBtn.addEventListener('click', function(){
       var mb = parseFloat(document.getElementById('mbInput').value);
@@ -1006,11 +1062,16 @@
           activeAccountId: 'acct-main'
         };
       } else {
-        var acct = getActiveAccount();
+        var acct = getActiveAccount(); 
         if (acct && acct.type === 'budget'){
-          acct.monthlyBudget = mb;
-          acct.refreshDay = rd;
-          acct.endDate = ed;
+          // Sync settings across all budget accounts
+          state.accounts.forEach(function(a){
+             if (a.type === 'budget') {
+                 if (a.id === acct.id) a.monthlyBudget = mb;
+                 a.refreshDay = rd; // Force sync globally
+                 a.endDate = ed;    // Force sync globally
+             }
+          });
         }
       }
       save(state);
@@ -1018,7 +1079,6 @@
       render();
     });
 
-    // ---- Account management ----
     var openAddAcct = app.querySelector('[data-act="openAddAccount"]');
     if (openAddAcct) openAddAcct.addEventListener('click', function(){
       newAccountType = 'budget';
@@ -1052,6 +1112,11 @@
         newAcct.monthlyBudget = mb;
         newAcct.refreshDay = rd;
         newAcct.endDate = document.getElementById('newAcctEnd').value || null;
+        
+        // Force existing budget accounts to match this new linked date
+        state.accounts.forEach(function(a){
+           if(a.type === 'budget') { a.refreshDay = rd; a.endDate = newAcct.endDate; }
+        });
       } else {
         var bal = parseFloat(document.getElementById('newAcctBal').value) || 0;
         newAcct.balance = bal;
@@ -1062,7 +1127,6 @@
       render();
     });
 
-    // Select account (opens edit panel from accounts tab)
     app.querySelectorAll('[data-act="selectAccount"]').forEach(function(card){
       card.addEventListener('click', function(){
         editingAccountId = card.dataset.id;
@@ -1071,7 +1135,6 @@
       });
     });
 
-    // Save edited account
     var saveEditAcct = app.querySelector('[data-act="saveEditAccount"]');
     if (saveEditAcct) saveEditAcct.addEventListener('click', function(){
       var ea = getAccountById(editingAccountId);
@@ -1084,8 +1147,12 @@
         var rd = parseInt(document.getElementById('editAcctRefresh').value, 10);
         if (!mb || mb <= 0 || !rd || rd < 1 || rd > 31) return;
         ea.monthlyBudget = mb;
-        ea.refreshDay = rd;
-        ea.endDate = document.getElementById('editAcctEnd').value || null;
+        
+        var ed = document.getElementById('editAcctEnd').value || null;
+        // Sync dates to all budget accounts
+        state.accounts.forEach(function(a){
+           if(a.type === 'budget') { a.refreshDay = rd; a.endDate = ed; }
+        });
       } else {
         ea.balance = parseFloat(document.getElementById('editAcctBal').value) || 0;
       }
@@ -1095,7 +1162,6 @@
       render();
     });
 
-    // Delete account
     var delAcctBtn = app.querySelector('[data-act="deleteAccount"]');
     if (delAcctBtn) delAcctBtn.addEventListener('click', function(){
       var id = delAcctBtn.dataset.id;
@@ -1105,14 +1171,12 @@
       }
       if (!confirm('Delete this account and all its data?')) return;
       
-      // Find all transfers linked to this account to clean up sibling expenses
       var linkedTxIds = (state.transfers || [])
         .filter(function(t){ return t.fromId === id || t.toId === id; })
         .map(function(t){ return t.id; });
 
       state.accounts = state.accounts.filter(function(a){ return a.id !== id; });
 
-      // Remove orphaned transfer expenses from remaining accounts
       if (linkedTxIds.length > 0) {
         state.accounts.forEach(function(a){
           if (a.expenses) {
@@ -1124,7 +1188,7 @@
       }
 
       state.transfers = (state.transfers || []).filter(function(t){ return t.fromId !== id && t.toId !== id; });
-      if (state.activeAccountId === id){
+      if (state.activeAccountId === id || state.activeAccountId === 'combined'){
         var budgets = state.accounts.filter(function(a){ return a.type === 'budget'; });
         state.activeAccountId = budgets.length ? budgets[0].id : state.accounts[0].id;
       }
@@ -1134,7 +1198,6 @@
       render();
     });
 
-    // ---- Transfer ----
     var openTransfer = app.querySelector('[data-act="openTransfer"]');
     if (openTransfer) openTransfer.addEventListener('click', function(){
       panelOpen = 'transfer';
@@ -1150,7 +1213,6 @@
       if (fromId === toId){ alert('Cannot transfer to the same account.'); return; }
 
       var now = Date.now();
-      // Create transfer record
       if (!state.transfers) state.transfers = [];
       var txId = genId('tx');
       state.transfers.push({
@@ -1162,9 +1224,6 @@
         ts: now
       });
 
-      // Log as zero-amount visibility entries on budget accounts (actual
-      // balance math is handled by budgetRemaining via state.transfers).
-      // Each expense stores transferId so deletion stays in sync.
       var fromAcct = getAccountById(fromId);
       var toAcct = getAccountById(toId);
       var fromName = fromAcct ? fromAcct.name : '?';
@@ -1200,7 +1259,6 @@
     var exportBtn = app.querySelector('[data-act="export"]');
     if (exportBtn) exportBtn.addEventListener('click', doExport);
 
-    // Delete transfer from recent transfers
     app.querySelectorAll('[data-act="deleteTx"]').forEach(function(btn){
       btn.addEventListener('click', function(ev){
         ev.stopPropagation();
@@ -1229,7 +1287,8 @@
       var dateStr = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
       var note = '"' + (e.note || '').replace(/"/g,'""') + '"';
       var tags = '"' + (e.tags||[]).join(' ') + '"';
-      rows.push([dateStr, note, tags, e.amount.toFixed(2)]);
+      var amt = e.amount ? e.amount.toFixed(2) : '0.00';
+      rows.push([dateStr, note, tags, amt]);
     });
     return rows.map(function(r){ return r.join(','); }).join('\n');
   }
@@ -1250,10 +1309,24 @@
     } catch(e){}
   }
   async function doExport(){
-    var acct = getActiveAccount();
-    if (!acct || !acct.expenses || !acct.expenses.length) return;
-    var csv = buildCsv(acct.expenses);
-    var filename = 'budget-export-' + acct.name.replace(/\s+/g,'-').toLowerCase() + '-' + new Date().toISOString().slice(0,10) + '.csv';
+    var isCombined = state.activeAccountId === 'combined';
+    var expenses = [];
+    var name = 'budget';
+    
+    if (isCombined) {
+        var budgetAccts = state.accounts.filter(function(a){ return a.type === 'budget'; });
+        budgetAccts.forEach(function(a){ expenses = expenses.concat(a.expenses); });
+        name = 'combined-budget';
+    } else {
+        var acct = getActiveAccount();
+        if (!acct) return;
+        expenses = acct.expenses;
+        name = 'budget-export-' + acct.name.replace(/\s+/g,'-').toLowerCase();
+    }
+    
+    if (!expenses || !expenses.length) return;
+    var csv = buildCsv(expenses);
+    var filename = name + '-' + new Date().toISOString().slice(0,10) + '.csv';
     var dl = await getDownloads();
     if (!dl){ fallbackDownload(csv, filename); return; }
     try{ await dl.save({ filename: filename, data: csv }); }
@@ -1289,11 +1362,8 @@
     var btn = document.getElementById('installBtn');
     var help = document.getElementById('installHelp');
     if (!btn) return;
-    // Already installed: hide everything.
     if (isStandalone()) return;
-    // Chrome/Edge/Android: show once beforeinstallprompt has fired.
     if (deferredPrompt) btn.classList.add('show');
-    // iOS Safari has no prompt: show manual instructions.
     if (isIosSafari() && help){
       btn.classList.add('show');
       btn.textContent = 'Download app';
@@ -1314,7 +1384,6 @@
     });
   }
 
-  // Offline support: no-op on file://, works when served over http(s).
   if ('serviceWorker' in navigator && /^https?:$/.test(window.location.protocol)){
     window.addEventListener('load', function(){
       try { navigator.serviceWorker.register('./sw.js'); } catch (e) {}
